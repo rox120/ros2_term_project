@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
+from ros2_term_project import line_follower
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
@@ -30,7 +31,8 @@ class LidarObstacleAvoidance(Node):
 
             # 기본 속도 설정
             self.current_speed = 2.0  # 기본 속도 (단위: m/s)
-            self.min_safe_distance = 1.5  # 장애물로부터의 안전 거리 (단위: m)
+            self.min_safe_distance = 8.0  # 안전 정지 거리를 8m로 설정
+            self.safe_resume_distance = 6.0  # 재출발을 위한 최소 거리를 6m로 설정
             self.obstacle_detected = False
             self.previous_distance = float('inf')
 
@@ -39,6 +41,13 @@ class LidarObstacleAvoidance(Node):
 
             # 차선 감지와 정지선 감지를 위한 publisher 생성
             self.pause_publisher = self.create_publisher(String, '/PR001/pause_lane_following', qos_profile)
+
+            # 장애물 상태를 알리는 publisher 추가
+            self.obstacle_publisher = self.create_publisher(
+                String,
+                '/PR001/obstacle_status',
+                10
+            )
 
             self.get_logger().info('LidarObstacleAvoidance 노드가 성공적으로 초기화되었습니다.')
 
@@ -60,23 +69,39 @@ class LidarObstacleAvoidance(Node):
             if min_distance < self.min_safe_distance:
                 self.get_logger().info(f'장애물 감지! 최소 거리: {min_distance}m. 속도 감소.')
                 self.obstacle_detected = True
-                self.publish_pause(True)  # 차선 및 정지선 감지 중지 신호 발행
-            elif self.obstacle_detected and min_distance > self.previous_distance:
-                # 장애물과의 거리가 멀어지고 있을 때만 출발
-                self.get_logger().info(f'장애물과의 거리 증가 확인. 차량 출발.')
+
+                # 장애물 감지 상태와 거리 정보 발행
+                status_msg = String()
+                status_msg.data = f'distance:{min_distance}'
+                self.obstacle_publisher.publish(status_msg)
+
+                # 차량 정지
+                twist = Twist()
+                twist.linear.x = 0.0
+                self.twist_publisher.publish(twist)
+
+            # 장애물이 감지된 상태에서, 거리가 1m 이상 증가했을 때
+            elif self.obstacle_detected and (min_distance - self.previous_distance) > 1.0:
+                self.get_logger().info(f'장애물과의 거리가 충분히 증가함. 차량 출발.')
                 self.obstacle_detected = False
-                self.publish_pause(False)  # 차선 및 정지선 감지 재개 신호 발행
+
+                # 장애물 제거 상태와 거리 정보 발행
+                status_msg = String()
+                status_msg.data = f'distance:{min_distance}'
+                self.obstacle_publisher.publish(status_msg)
+
+            # 장애물이 감지되지 않는 상태
+            elif min_distance > self.min_safe_distance:
+                if self.obstacle_detected:
+                    self.get_logger().info('장애물이 더 이상 감지되지 않음.')
+                    self.obstacle_detected = False
+
+                    # 장애물 제거 상태와 거리 정보 발행
+                    status_msg = String()
+                    status_msg.data = f'distance:{min_distance}'
+                    self.obstacle_publisher.publish(status_msg)
 
             self.previous_distance = min_distance
-
-            # 차량 속도 제어
-            twist = Twist()
-            if self.obstacle_detected:
-                twist.linear.x = 0.0  # 장애물 감지 시 속도를 0으로 설정 (정지)
-            else:
-                twist.linear.x = self.current_speed  # 장애물이 없거나 멀어지는 경우 기본 속도 유지
-            self.twist_publisher.publish(twist)
-            self.get_logger().info(f'속도 명령 퍼블리시: linear.x={twist.linear.x}')
 
         except Exception as e:
             self.get_logger().error(f'Lidar 데이터 처리 중 오류 발생: {e}')
